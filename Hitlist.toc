@@ -2,8 +2,9 @@
 ## Title: Hitlist
 ## Notes: Adds a Hitlist tab to the Social window for the players you owe a visit.
 ## Author: Vizer
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: HitlistDB
 
 Core.lua
+Guild.lua
 Social.lua

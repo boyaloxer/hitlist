@@ -67,11 +67,7 @@ local function ShowCardTooltip(card)
 		GameTooltip:AddLine(entry.note, 1, 0.82, 0, true)
 	end
 	GameTooltip:AddLine(" ")
-	local added = "Added " .. H.Date(entry.added, true)
-	if entry.addedZone then
-		added = added .. " in " .. entry.addedZone
-	end
-	GameTooltip:AddLine(added, 0.6, 0.6, 0.6, true)
+	GameTooltip:AddLine(H:AddedLine(entry, true), 0.6, 0.6, 0.6, true)
 	if entry.seen then
 		local seen = "Last seen " .. H.Ago(entry.seen)
 		if entry.seenZone then
@@ -179,11 +175,7 @@ local function UpdateCard(card, elementData)
 	if entry.note then
 		card.Note:SetText("|cffffd100" .. entry.note .. "|r")
 	else
-		local added = "Added " .. H.Date(entry.added)
-		if entry.addedZone then
-			added = added .. " in " .. entry.addedZone
-		end
-		card.Note:SetText("|cff808080" .. added .. "|r")
+		card.Note:SetText("|cff808080" .. H:AddedLine(entry) .. "|r")
 	end
 end
 

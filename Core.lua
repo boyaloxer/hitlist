@@ -8,6 +8,8 @@ Hitlist = H
 
 local TAG = "|cffff4d4dHitlist|r: "
 local ALERT_COOLDOWN = 120 -- seconds between "nearby" alerts for the same player
+local MICRO = 1000000      -- guild chat stamps its lines in microseconds
+local LOCAL_LEAD = MICRO   -- your own changes are stamped a second ahead, so their echo in guild chat is old news
 local SEEN_REFRESH = 5     -- seconds between list refreshes caused by sightings
 
 local function Print(message)
@@ -25,6 +27,8 @@ H.Print = Print
 local function IsSecret(value)
 	return issecretvalue ~= nil and issecretvalue(value)
 end
+
+H.IsSecret = IsSecret
 
 local function Plain(value)
 	if IsSecret(value) then
@@ -106,6 +110,7 @@ local function CleanName(text)
 	end)
 	return name
 end
+H.CleanName = CleanName
 
 local function Zone()
 	local zone = GetRealZoneText and GetRealZoneText() or (GetZoneText and GetZoneText())
@@ -162,6 +167,30 @@ function H.Date(timestamp, long)
 	return date(long and "%b %d, %Y" or "%b %d", timestamp)
 end
 
+-- Server time in microseconds, the unit guild chat lines are stamped in.
+function H.Now()
+	return (GetServerTime and GetServerTime() or time()) * MICRO
+end
+
+-- "Added by you on Nov 11, 2026 in Tanaris" for the tooltip; the short form
+-- for a card is "Added Nov 11 in Tanaris" or "Added Nov 11 by Some Guildie".
+function H:AddedLine(entry, long)
+	local mine = not entry.addedBy or self:IsMe(entry.addedBy)
+	local line
+	if long then
+		line = "Added by " .. (mine and "you" or entry.addedBy) .. " on " .. H.Date(entry.added, true)
+	else
+		line = "Added " .. H.Date(entry.added)
+		if not mine then
+			line = line .. " by " .. entry.addedBy
+		end
+	end
+	if entry.addedZone then
+		line = line .. " in " .. entry.addedZone
+	end
+	return line
+end
+
 function H.Ago(timestamp)
 	local seconds = time() - (timestamp or 0)
 	if seconds < 60 then
@@ -201,6 +230,23 @@ function H:InitDB()
 	end
 	if db.alert == nil then
 		db.alert = true
+	end
+	if db.guild == nil then
+		db.guild = true -- share adds and removes through guild chat
+	end
+	if type(db.sync) ~= "table" then
+		db.sync = {}
+	end
+	-- log[key] = the last add or remove known for that name, by anyone:
+	-- { op = "add" | "remove", by = who, t = when in microseconds }. An older
+	-- line read from guild chat later never undoes a newer change.
+	if type(db.log) ~= "table" then
+		db.log = {}
+	end
+	for key, entry in pairs(db.players) do
+		if not db.log[key] then
+			db.log[key] = { op = "add", by = entry.addedBy, t = (entry.added or 0) * MICRO }
+		end
 	end
 	self.db = db
 end
@@ -305,9 +351,16 @@ end
 
 local lastAlert = {}
 
--- Adds a player (or updates the note of one already listed).
+-- Records the latest add or remove for a name. Without `when` it is your own
+-- change, happening now.
+function H:Stamp(key, op, by, when)
+	self.db.log[key] = { op = op, by = by or self.myName, t = when or (H.Now() + LOCAL_LEAD) }
+end
+
+-- Adds a player (or updates the note of one already listed). `by` and `when`
+-- (microseconds) are given for an add read from guild chat.
 -- Returns entry, isNew, key.
-function H:Add(name, note, unit)
+function H:Add(name, note, unit, by, when)
 	local key = H.Key(name)
 	if not key or not self.db then
 		return nil
@@ -317,11 +370,12 @@ function H:Add(name, note, unit)
 	if isNew then
 		entry = {
 			name = name,
-			added = time(),
-			addedZone = Zone(),
-			addedBy = self.myName,
+			added = when and math.floor(when / MICRO) or time(),
+			addedZone = not by and Zone() or nil,
+			addedBy = by or self.myName,
 		}
 		self.db.players[key] = entry
+		self:Stamp(key, "add", by, when)
 	end
 	if note and note ~= "" then
 		entry.note = note
@@ -334,12 +388,13 @@ function H:Add(name, note, unit)
 	return entry, isNew, key
 end
 
-function H:RemoveByKey(key)
+function H:RemoveByKey(key, by, when)
 	local entry = self:GetByKey(key)
 	if not entry then
 		return nil
 	end
 	self.db.players[key] = nil
+	self:Stamp(key, "remove", by, when)
 	lastAlert[key] = nil
 	self:Changed()
 	return entry
@@ -389,6 +444,7 @@ function H:AddTyped(text, note)
 	end
 	if isNew then
 		Print(self:ColorName(entry) .. " is on your hitlist.")
+		ns.G:Announce("add", entry.name)
 		return key
 	end
 	if note and note ~= "" then
@@ -413,14 +469,24 @@ function H:AddTarget(note)
 	return self:AddTyped(name, note)
 end
 
+-- Takes someone off the list because you said so, and tells the guild.
+function H:Remove(key)
+	local entry = self:RemoveByKey(key)
+	if not entry then
+		return nil
+	end
+	Print(self:ColorName(entry) .. " is off your hitlist.")
+	ns.G:Announce("remove", entry.name)
+	return entry
+end
+
 function H:RemoveTyped(text)
 	local entry, key = self:Get(text)
 	if not entry then
 		Print("nobody called \"" .. tostring(text) .. "\" is on your hitlist.")
 		return false
 	end
-	self:RemoveByKey(key)
-	Print(self:ColorName(entry) .. " is off your hitlist.")
+	self:Remove(key)
 	return true
 end
 
@@ -574,9 +640,8 @@ StaticPopupDialogs["HITLIST_REMOVE"] = {
 	button1 = REMOVE or "Remove",
 	button2 = CANCEL or "Cancel",
 	OnAccept = function(_, data)
-		local entry = data and H:RemoveByKey(data.key)
-		if entry then
-			Print(H:ColorName(entry) .. " is off your hitlist.")
+		if data then
+			H:Remove(data.key)
 		end
 	end,
 	timeout = 0,
@@ -676,6 +741,42 @@ local function HookUnitMenus()
 end
 
 -- ---------------------------------------------------------------------------
+-- Unit tooltip: a red "Hitlist" line under anyone who is on the list
+-- ---------------------------------------------------------------------------
+
+local function OnUnitTooltip(tooltip)
+	if tooltip ~= GameTooltip or not H.db or next(H.db.players) == nil then
+		return
+	end
+	if tooltip.IsForbidden and tooltip:IsForbidden() then
+		return
+	end
+	local unit
+	if tooltip.GetUnit then
+		local _, token = tooltip:GetUnit()
+		if not IsSecret(token) and type(token) == "string" then
+			unit = token
+		end
+	end
+	unit = unit or "mouseover"
+	if not UnitExists(unit) or not UnitIsPlayer(unit) then
+		return
+	end
+	if H:Has(H.UnitName(unit)) then
+		tooltip:AddLine("Hitlist", 1, 0.1, 0.1)
+	end
+end
+
+local function HookUnitTooltip()
+	local unitType = Enum and Enum.TooltipDataType and Enum.TooltipDataType.Unit
+	if unitType and TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall then
+		TooltipDataProcessor.AddTooltipPostCall(unitType, OnUnitTooltip)
+	elseif GameTooltip and GameTooltip.HasScript and GameTooltip:HasScript("OnTooltipSetUnit") then
+		GameTooltip:HookScript("OnTooltipSetUnit", OnUnitTooltip)
+	end
+end
+
+-- ---------------------------------------------------------------------------
 -- Slash commands
 -- ---------------------------------------------------------------------------
 
@@ -698,6 +799,8 @@ local function PrintHelp()
 	print("  /hit remove Name  -  take someone off the list")
 	print("  /hit list  -  print the list in chat")
 	print("  /hit alert  -  turn the nearby alert on or off")
+	print("  /hit guild  -  turn sharing through guild chat on or off")
+	print("  /hit sync  -  read guild chat again for Hitlist lines")
 end
 
 SLASH_HITLIST1 = "/hitlist"
@@ -744,6 +847,10 @@ SlashCmdList["HITLIST"] = function(message)
 	elseif command == "alert" or command == "alerts" then
 		H.db.alert = not H.db.alert
 		Print("nearby alerts are " .. (H.db.alert and "on." or "off."))
+	elseif command == "guild" then
+		ns.G:Toggle()
+	elseif command == "sync" then
+		ns.G:Status()
 	else
 		PrintHelp()
 	end
@@ -768,7 +875,9 @@ events:SetScript("OnEvent", function(_, event, arg1)
 		H.loggedIn = true
 		H.myName = H.UnitName("player")
 		HookUnitMenus()
+		HookUnitTooltip()
 		ns.S:TrySetup()
+		ns.G:Start()
 		events:RegisterEvent("PLAYER_TARGET_CHANGED")
 		events:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 		events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
