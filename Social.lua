@@ -271,13 +271,19 @@ local function BuildPage()
 	ScrollUtil.InitScrollBoxListWithScrollBar(page.ScrollBox, page.ScrollBar, view)
 end
 
+-- The skull is a bone-white texture, tinted to the gold of Blizzard's tab
+-- icons. Both tints were matched against screenshots of those icons, lit
+-- (selected) and unlit.
+local TAB_TINT_ON = { 0.97, 0.84, 0.15 }
+local TAB_TINT_OFF = { 0.67, 0.59, 0.16 }
+-- Blizzard's icons have a little empty space on their right, so the skull,
+-- which fills its texture edge to edge, sat a pixel right of them.
+local TAB_ICON_NUDGE_X = -1
+
 local function PaintTab(checked)
 	tab:SetChecked(checked)
-	if checked then
-		tab.Icon:SetVertexColor(1, 0.82, 0)
-	else
-		tab.Icon:SetVertexColor(0.72, 0.6, 0.38)
-	end
+	local tint = checked and TAB_TINT_ON or TAB_TINT_OFF
+	tab.Icon:SetVertexColor(tint[1], tint[2], tint[3])
 end
 
 local function BuildTab()
@@ -288,6 +294,17 @@ local function BuildTab()
 	tab:Initialize({ tabName = TITLE })
 	tab.Icon:SetTexture(SKULL)
 	tab.Icon:SetSize(24, 24)
+	-- Blizzard re-anchors the icon on every press and release through this
+	-- method, so the nudge goes in here (on this tab only) to survive that.
+	local blizzardOffsets = tab.GetIconAnchorOffsetsForTabArt
+	if blizzardOffsets then
+		tab.GetIconAnchorOffsetsForTabArt = function(self)
+			local x, y = blizzardOffsets(self)
+			return x + TAB_ICON_NUDGE_X, y
+		end
+		local x, y = tab:GetFinalIconAnchorOffsets()
+		tab.Icon:SetPoint("CENTER", x, y)
+	end
 	tab:SetScript("OnClick", function()
 		S:Activate()
 	end)
