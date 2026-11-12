@@ -201,7 +201,6 @@ function S:Refresh()
 	if setup ~= "ready" then
 		return
 	end
-	tab:RefreshCounter()
 	if not page:IsShown() then
 		return
 	end
@@ -284,12 +283,9 @@ end
 local function BuildTab()
 	-- The same template Blizzard's side tabs use, so it matches them.
 	tab = CreateFrame("Button", "HitlistSocialTab", root, "SocialUITabTemplate")
-	tab:Initialize({
-		tabName = TITLE,
-		countGenerator = function()
-			return H:Count()
-		end,
-	})
+	-- No countGenerator: the tab shows no number, and Blizzard's code then
+	-- keeps the icon centred like the tabs above it.
+	tab:Initialize({ tabName = TITLE })
 	tab.Icon:SetTexture(SKULL)
 	tab.Icon:SetSize(24, 24)
 	tab:SetScript("OnClick", function()
