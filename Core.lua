@@ -38,6 +38,127 @@ local function Plain(value)
 end
 
 -- ---------------------------------------------------------------------------
+-- Letters
+-- A name can hold letters outside plain ASCII (accents, Cyrillic, Vietnamese
+-- and so on), each stored as two or more bytes. The game's own upper() and
+-- lower() are only ever given ASCII here: handed part of such a letter they
+-- can break it, and a broken name can be neither posted nor matched. Case is
+-- changed a whole letter at a time, and a letter that is not recognised is
+-- left exactly as it is.
+-- ---------------------------------------------------------------------------
+
+local WORD = "[^ \t\r\n]+"
+local BLANKS = "[ \t\r\n]+"
+
+-- True for text made of whole, well-formed letters (valid UTF-8).
+local function IsText(text)
+	if type(text) ~= "string" then
+		return false
+	end
+	local at, size = 1, #text
+	while at <= size do
+		local lead = text:byte(at)
+		local more
+		if lead >= 1 and lead <= 127 then
+			more = 0
+		elseif lead >= 194 and lead <= 223 then
+			more = 1
+		elseif lead >= 224 and lead <= 239 then
+			more = 2
+		elseif lead >= 240 and lead <= 244 then
+			more = 3
+		else
+			return false
+		end
+		for index = at + 1, at + more do
+			local byte = text:byte(index)
+			if not byte or byte < 128 or byte > 191 then
+				return false
+			end
+		end
+		at = at + more + 1
+	end
+	return true
+end
+H.IsText = IsText
+
+-- Capital letters outside ASCII, as { first, last, step } ranges of code
+-- points. The small letter is `step` after its capital; a step of 1 means
+-- capitals and small letters alternate through the range.
+local CAPITALS = {
+	{ 0x00C0, 0x00D6, 32 }, { 0x00D8, 0x00DE, 32 }, { 0x0178, 0x0178, -121 }, -- accented Latin
+	{ 0x0100, 0x012F, 1 }, { 0x0132, 0x0137, 1 }, { 0x0139, 0x0148, 1 }, { 0x014A, 0x0177, 1 }, { 0x0179, 0x017E, 1 },
+	{ 0x01CD, 0x01DC, 1 }, { 0x01DE, 0x01EF, 1 }, { 0x01F8, 0x021F, 1 }, { 0x0222, 0x0233, 1 },
+	{ 0x0391, 0x03A1, 32 }, { 0x03A3, 0x03A9, 32 }, -- Greek
+	{ 0x0400, 0x040F, 80 }, { 0x0410, 0x042F, 32 }, -- Cyrillic
+	{ 0x1E00, 0x1E95, 1 }, { 0x1EA0, 0x1EFF, 1 }, -- Vietnamese and other marked Latin
+}
+
+local function Recode(code, up)
+	for index = 1, #CAPITALS do
+		local first, last, step = CAPITALS[index][1], CAPITALS[index][2], CAPITALS[index][3]
+		if step == 1 then
+			if code >= first and code <= last then
+				local isSmall = (code - first) % 2 == 1
+				if isSmall == up then
+					return up and code - 1 or code + 1
+				end
+				return code
+			end
+		elseif up then
+			if code >= first + step and code <= last + step then
+				return code - step
+			end
+		elseif code >= first and code <= last then
+			return code + step
+		end
+	end
+	return code
+end
+
+-- One letter of two or three bytes as a capital (`up`) or a small letter.
+local function Recase(letter, up)
+	local a, b, c = letter:byte(1, 3)
+	local code
+	if #letter == 2 and a >= 194 and a <= 223 then
+		code = (a - 192) * 64 + (b - 128)
+	elseif #letter == 3 and a >= 224 and a <= 239 then
+		code = (a - 224) * 4096 + (b - 128) * 64 + (c - 128)
+	else
+		return letter
+	end
+	local recoded = Recode(code, up)
+	if recoded == code then
+		return letter
+	elseif recoded < 2048 then
+		return string.char(192 + math.floor(recoded / 64), 128 + recoded % 64)
+	end
+	return string.char(224 + math.floor(recoded / 4096), 128 + math.floor(recoded / 64) % 64, 128 + recoded % 64)
+end
+
+local function Small(letter)
+	return Recase(letter, false)
+end
+
+local function Lower(text)
+	text = text:gsub("[A-Z]+", string.lower)
+	return (text:gsub("[\194-\239][\128-\191]+", Small))
+end
+H.Lower = Lower
+
+-- A word with its first letter as a capital.
+local function Capitalise(word)
+	if word:find("^[a-z]") then
+		return word:sub(1, 1):upper() .. word:sub(2)
+	end
+	local first = word:match("^[\194-\239][\128-\191]+")
+	if not first then
+		return word
+	end
+	return Recase(first, true) .. word:sub(#first + 1)
+end
+
+-- ---------------------------------------------------------------------------
 -- Names
 -- Forever characters are "Name Surname" with no realm, so a full name can
 -- contain a space. Other clients give "Name" plus an optional realm.
@@ -89,11 +210,11 @@ function H.Key(name)
 	if surnameSeparator ~= " " and surnameSeparator ~= "" then
 		name = name:gsub(surnameSeparator:gsub("%p", "%%%0"), " ")
 	end
-	name = strtrim(name):gsub("%s+", " ")
+	name = strtrim(name):gsub(BLANKS, " ")
 	if name == "" then
 		return nil
 	end
-	return name:lower()
+	return Lower(name)
 end
 
 -- Tidies a typed name for display: single spaces, each word capitalised.
@@ -101,14 +222,11 @@ local function CleanName(text)
 	if type(text) ~= "string" then
 		return nil
 	end
-	local name = strtrim(text):gsub("%s+", " ")
+	local name = strtrim(text):gsub(BLANKS, " ")
 	if name == "" then
 		return nil
 	end
-	name = name:gsub("%S+", function(word)
-		return word:sub(1, 1):upper() .. word:sub(2)
-	end)
-	return name
+	return (name:gsub(WORD, Capitalise))
 end
 H.CleanName = CleanName
 
@@ -219,12 +337,47 @@ function H:Changed()
 	end
 end
 
+-- Lists saved before version 1.1.3 were keyed with the game's own lower(), and
+-- a name starting with a letter outside ASCII could be saved broken. Files
+-- everything under the keys used now and takes out the names that cannot be
+-- read. Returns the names it took out.
+local function Rekey(db)
+	local players, log, moved, dropped = {}, {}, {}, {}
+	for old, entry in pairs(db.players) do
+		local key = type(entry) == "table" and IsText(entry.name) and H.Key(entry.name) or nil
+		if key then
+			if not players[key] or (entry.added or 0) > (players[key].added or 0) then
+				players[key] = entry
+			end
+			moved[old] = key
+		else
+			local name = type(entry) == "table" and type(entry.name) == "string" and entry.name or tostring(old)
+			name = name:gsub("[\128-\255]+", "?")
+			if type(entry) == "table" and type(entry.note) == "string" then
+				name = name .. " (" .. entry.note .. ")"
+			end
+			dropped[#dropped + 1] = name
+			moved[old] = false
+		end
+	end
+	for old, record in pairs(db.log) do
+		local key = moved[old]
+		if key == nil and IsText(old) then
+			key = H.Key(old)
+		end
+		if key and type(record) == "table" and (not log[key] or (record.t or 0) > (log[key].t or 0)) then
+			log[key] = record
+		end
+	end
+	db.players, db.log = players, log
+	return dropped
+end
+
 function H:InitDB()
 	if type(HitlistDB) ~= "table" then
 		HitlistDB = {}
 	end
 	local db = HitlistDB
-	db.version = db.version or 1
 	if type(db.players) ~= "table" then
 		db.players = {}
 	end
@@ -248,7 +401,21 @@ function H:InitDB()
 			db.log[key] = { op = "add", by = entry.addedBy, t = (entry.added or 0) * MICRO }
 		end
 	end
+	if (tonumber(db.version) or 1) < 2 then
+		self.dropped = Rekey(db)
+	end
+	db.version = 2
 	self.db = db
+end
+
+-- Says which names InitDB had to take out, once.
+function H:ReportDropped()
+	local dropped = self.dropped
+	self.dropped = nil
+	if dropped and #dropped > 0 then
+		Print("names an older version saved wrongly were taken off your hitlist: " .. table.concat(dropped, ", ")
+			.. ". Add them again when you next see them.")
+	end
 end
 
 function H:GetByKey(key)
@@ -321,17 +488,17 @@ function H:Sorted(search)
 	if not self.db then
 		return keys
 	end
-	search = search and search ~= "" and search:lower() or nil
+	search = search and search ~= "" and Lower(search) or nil
 	for key, entry in pairs(self.db.players) do
 		local matches = true
 		if search then
-			local haystack = table.concat({
+			local haystack = Lower(table.concat({
 				key,
 				entry.note or "",
 				entry.guild or "",
 				entry.classLoc or "",
 				entry.race or "",
-			}, "\n"):lower()
+			}, "\n"))
 			matches = haystack:find(search, 1, true) ~= nil
 		end
 		if matches then
@@ -426,11 +593,24 @@ local function TargetUnitFor(name)
 	return nil
 end
 
+-- Posts an add in guild chat. One that could not be posted is remembered on
+-- the entry and tried again the next time that player is added.
+function H:Share(entry)
+	local posted = ns.G:Announce("add", entry.name)
+	if posted ~= nil then
+		entry.unshared = not posted or nil
+	end
+end
+
 -- Adds a typed name. Returns the entry's key when someone new was added.
 function H:AddTyped(text, note)
 	local name = CleanName(text)
 	if not name then
 		Print("type a character name, for example  /hit add Gas Giant")
+		return nil
+	end
+	if not IsText(name) then
+		Print("that name has letters the game can't read. Target the player and use  /hit add")
 		return nil
 	end
 	if self:IsMe(name) then
@@ -444,13 +624,16 @@ function H:AddTyped(text, note)
 	end
 	if isNew then
 		Print(self:ColorName(entry) .. " is on your hitlist.")
-		ns.G:Announce("add", entry.name)
+		self:Share(entry)
 		return key
 	end
 	if note and note ~= "" then
 		Print("note updated for " .. self:ColorName(entry) .. ".")
 	else
 		Print(self:ColorName(entry) .. " is already on your hitlist.")
+	end
+	if entry.unshared then
+		self:Share(entry)
 	end
 	return nil
 end
@@ -783,7 +966,7 @@ end
 -- "Gas Giant: camped me" -> "Gas Giant", "camped me". Names can contain a
 -- space here, so the note needs its own separator.
 local function SplitNameAndNote(text)
-	local name, note = text:match("^(.-)%s*:%s*(.*)$")
+	local name, note = text:match("^(.-)[ \t]*:[ \t]*(.*)$")
 	if name then
 		return name, note
 	end
@@ -810,8 +993,8 @@ SlashCmdList["HITLIST"] = function(message)
 		return
 	end
 	message = strtrim(message or "")
-	local command, rest = message:match("^(%S+)%s*(.-)$")
-	command = command and command:lower() or ""
+	local command, rest = message:match("^([^ \t]+)[ \t]*(.-)$")
+	command = command and Lower(command) or ""
 	rest = rest or ""
 
 	if command == "" or command == "show" or command == "open" then
@@ -874,6 +1057,7 @@ events:SetScript("OnEvent", function(_, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		H.loggedIn = true
 		H.myName = H.UnitName("player")
+		H:ReportDropped()
 		HookUnitMenus()
 		HookUnitTooltip()
 		ns.S:TrySetup()

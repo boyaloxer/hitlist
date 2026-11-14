@@ -25,7 +25,8 @@ local MAX_AGE = 30 * 86400  -- how far back a catch-up reads, in seconds
 local REQUEST_GAP = 0.5     -- seconds between history requests
 local MAX_RETRIES = 5       -- catch-ups restarted in a row because chat could not be read
 local RETRY_GAP = 10        -- seconds between those restarts
-local NAME_WORD = "^[%a\128-\255][%a\128-\255'%-]*$"
+local MAX_LETTERS = 80      -- longest line that is looked at
+local NAME_WORD = "^[A-Za-z\128-\255][A-Za-z\128-\255'%-]*$" -- bytes from 128 up are letters outside ASCII
 
 local state = "idle"   -- "idle", "waiting" (history asked for), "paging" or "done"
 local cursor           -- id of the oldest line read so far in this catch-up
@@ -68,16 +69,20 @@ end
 
 -- "Hitlist Add: Gas Giant" -> "add", "Gas Giant". Nil for anything else.
 function G.Parse(text)
-	if type(text) ~= "string" or #text > 80 then
+	if not H.IsText(text) then
 		return nil
 	end
-	local verb, name = text:match("^%s*[Hh][Ii][Tt][Ll][Ii][Ss][Tt]%s+(%a+)%s*:%s*(.-)%s*$")
+	local _, letters = text:gsub("[^\128-\191]", "") -- a letter outside ASCII is several bytes
+	if letters > MAX_LETTERS then
+		return nil
+	end
+	local verb, name = text:match("^[ \t]*[Hh][Ii][Tt][Ll][Ii][Ss][Tt][ \t]+([A-Za-z]+)[ \t]*:[ \t]*(.-)[ \t]*$")
 	verb = verb and verb:lower()
 	if verb ~= "add" and verb ~= "remove" then
 		return nil
 	end
 	local words = 0
-	for word in name:gmatch("%S+") do
+	for word in name:gmatch("[^ \t]+") do
 		words = words + 1
 		if words > 2 or not word:find(NAME_WORD) then
 			return nil
@@ -95,20 +100,34 @@ end
 
 -- Says your own add or remove in guild chat. Always called straight from a
 -- click or a key press, which is what the game wants for chat an addon sends.
+-- Returns true when the line was said, false when it could not be, and nil
+-- when there was nothing to say.
 function G:Announce(op, name)
 	if not Sharing() then
-		return false
+		return nil
 	end
 	local line = G.Line(op, name)
 	if not G.Parse(line) then
-		return false -- not a name other copies would accept
+		return nil -- not a name other copies would accept
 	end
 	local send = (C_ChatInfo and C_ChatInfo.SendChatMessage) or SendChatMessage
-	if Locked() or not send or not pcall(send, line, "GUILD") then
-		Print("couldn't post to guild chat right now. To share it, type this in guild chat:  " .. line)
-		return false
+	local failure
+	if Locked() or not send then
+		failure = ""
+	else
+		local ok, problem = pcall(send, line, "GUILD")
+		if not ok then
+			-- The game's own words for it, so a refusal can be told from a lockdown.
+			failure = (not IsSecret(problem) and type(problem) == "string") and (" (" .. problem:sub(1, 120) .. ")") or ""
+		end
 	end
-	return true
+	if not failure then
+		return true
+	end
+	Print("couldn't post to guild chat right now" .. failure .. ". "
+		.. (op == "add" and "Add them again later to share it, or type" or "To share it, type")
+		.. " this in guild chat:  " .. line)
+	return false
 end
 
 -- Acts on one guild chat line said by `author` at `when` (microseconds).
@@ -134,7 +153,9 @@ function G:Read(text, author, when, changes)
 		if H:IsMe(name) then
 			return
 		end
-		if H:GetByKey(key) then
+		local listed = H:GetByKey(key)
+		if listed then
+			listed.unshared = nil -- the guild has been told now
 			H:Stamp(key, "add", author, when)
 			return
 		end
